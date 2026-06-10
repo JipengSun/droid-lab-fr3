@@ -35,7 +35,16 @@ class RobotEnv(gym.Env):
 
             self._robot = FrankaRobot()
         else:
-            self._robot = ServerInterface(ip_address=nuc_ip)
+            # NUC already runs Polymetis + zerorpc — do not relaunch controller from workstation.
+            self._robot = ServerInterface(ip_address=nuc_ip, launch=False)
+            try:
+                self._robot.launch_robot()
+            except Exception as err:
+                print(
+                    f"Warning: launch_robot failed ({err.__class__.__name__}). "
+                    "Polymetis client may be down — check Desk FCI and relaunch on NUC.",
+                    flush=True,
+                )
 
         # Create Cameras
         self.camera_reader = MultiCameraWrapper(camera_kwargs)

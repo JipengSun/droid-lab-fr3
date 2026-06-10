@@ -1,1 +1,25 @@
 *.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+
+# Local recordings and generated media
+recordings/
+*.png
+!docs/**/*.png
+
+# ZED SDK wheel (install via scripts/setup/install_zed_python_api.sh)
+pyzed-*.whl
+
+# Polymetis build artifacts inside fairo submodule
+droid/fairo/polymetis/polymetis/build/
+droid/fairo/polymetis/polymetis/python/scripts/outputs/
+
+# IDE / agent (optional local only)
+.cursor/

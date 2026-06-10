@@ -34,8 +34,19 @@ class FrankaRobot:
 
     def launch_robot(self):
         self._robot = RobotInterface(ip_address="localhost")
-        self._gripper = GripperInterface(ip_address="localhost")
-        self._max_gripper_width = self._gripper.metadata.max_width
+        self._gripper = None
+        self._max_gripper_width = 0.085  # Robotiq 2F-85 default; used only if gripper connected
+        # Gripper USB is on the workstation in this lab — skip NUC GripperInterface unless
+        # explicitly enabled (otherwise launch_robot blocks zerorpc waiting for :50052).
+        if os.environ.get("DROID_GRIPPER_LOCAL", "").lower() in ("1", "true", "yes"):
+            try:
+                gripper = GripperInterface(ip_address="localhost")
+                metadata = getattr(gripper, "metadata", None)
+                if metadata is not None and metadata.max_width > 0:
+                    self._gripper = gripper
+                    self._max_gripper_width = metadata.max_width
+            except Exception:
+                pass
         self._ik_solver = RobotIKSolver()
         self._controller_not_loaded = False
 
@@ -115,6 +126,8 @@ class FrankaRobot:
                 run_threaded_command(helper_non_blocking)
 
     def update_gripper(self, command, velocity=True, blocking=False):
+        if self._gripper is None:
+            return
         if velocity:
             gripper_delta = self._ik_solver.gripper_velocity_to_delta(command)
             command = gripper_delta + self.get_gripper_position()
@@ -148,6 +161,8 @@ class FrankaRobot:
         return self._robot.get_joint_velocities().tolist()
 
     def get_gripper_position(self):
+        if self._gripper is None:
+            return 0.0
         return 1 - (self._gripper.get_state().width / self._max_gripper_width)
 
     def get_ee_pose(self):

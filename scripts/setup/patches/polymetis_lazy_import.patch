@@ -1,0 +1,25 @@
+diff --git a/polymetis/polymetis/python/polymetis/__init__.py b/polymetis/polymetis/python/polymetis/__init__.py
+index 32c3cceae..7dbb1070a 100644
+--- a/polymetis/polymetis/python/polymetis/__init__.py
++++ b/polymetis/polymetis/python/polymetis/__init__.py
+@@ -1,7 +1,17 @@
+ # Copyright (c) Facebook, Inc. and its affiliates.
+-
++#
+ # This source code is licensed under the MIT license found in the
+ # LICENSE file in the root directory of this source tree.
+ from ._version import __version__
+-from .robot_interface import RobotInterface
+-from .gripper_interface import GripperInterface
++
++
++def __getattr__(name):
++    if name == "RobotInterface":
++        from .robot_interface import RobotInterface
++
++        return RobotInterface
++    if name == "GripperInterface":
++        from .gripper_interface import GripperInterface
++
++        return GripperInterface
++    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
