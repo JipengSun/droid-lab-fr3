@@ -2,28 +2,22 @@
 """
 Demo: Robotiq 2F gripper open/close cycle (DROID-style), with optional hand camera preview.
 
-The gripper server must already be running in another terminal:
+Default (this lab): gripper USB on NUC — start gripper server on the NUC, then run
+this demo from the workstation via zerorpc:
 
-  bash scripts/setup/install_polymetis_gripper.sh   # once, if polymetis-local missing
-  conda activate polymetis-local
-  cd /home/pci/Desktop/DROID
-  bash droid/franka/launch_gripper.sh
-
-If the gripper is on a different USB port, edit `gripper.comport` in that script
-(or run launch_gripper.py manually with the correct port).
-
-Then run the demo:
-
-  conda activate polymetis-local
+  bash scripts/setup/openpi_start_gripper_nuc.sh   # once per session (NUC)
+  conda activate robot
   cd /home/pci/Desktop/DROID
   python scripts/demo/robotiq_gripper_demo.py
 
-With hand cameras (robot env — run install_gripper_client_robot.sh once first):
+With hand cameras:
 
-  bash scripts/setup/install_gripper_client_robot.sh
-  conda activate robot
-  cd /home/pci/Desktop/DROID
   python scripts/demo/robotiq_gripper_demo.py --show-cameras
+
+Legacy local gripper (workstation USB + polymetis-local):
+
+  bash droid/franka/launch_gripper.sh
+  python scripts/demo/robotiq_gripper_demo.py --local-gripper
 
 Gripper commands follow DROID conventions (see droid/franka/robot.py):
   position 0.0 = fully open, 1.0 = fully closed
@@ -33,11 +27,13 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 POLYMETIS_PYTHON = ROOT / "droid/fairo/polymetis/polymetis/python"
+DEFAULT_MAX_WIDTH = 0.085
 
 
 def load_gripper_interface():
@@ -115,7 +111,54 @@ def connect_gripper(ip_address: str, port: int, retries: int = 5):
             time.sleep(2.0)
     raise RuntimeError(
         "Could not connect to gripper server. "
-        "Start it first with: bash droid/franka/launch_gripper.sh"
+        "On NUC: bash scripts/setup/openpi_start_gripper_nuc.sh\n"
+        "On workstation (legacy): bash droid/franka/launch_gripper.sh"
+    ) from last_err
+
+
+class NucGripperProxy:
+    """Robotiq gripper via NUC zerorpc (USB on NUC, gRPC localhost:50052 on NUC)."""
+
+    def __init__(self, nuc_ip: str):
+        from droid.misc.server_interface import ServerInterface
+
+        self._robot = ServerInterface(ip_address=nuc_ip, launch=False)
+        self._robot.launch_robot()
+        self.max_width = DEFAULT_MAX_WIDTH
+        state, _ = self._robot.get_robot_state()
+        pos = float(state.get("gripper_position", 0.0))
+        if pos > 0:
+            self.max_width = DEFAULT_MAX_WIDTH
+
+    def goto(self, width: float, speed: float, force: float, blocking: bool):
+        position = droid_width_to_position(width, self.max_width)
+        self._robot.update_gripper(position, velocity=False, blocking=blocking)
+
+    def get_state(self):
+        state, _ = self._robot.get_robot_state()
+        pos = float(state["gripper_position"])
+        width = droid_position_to_width(pos, self.max_width)
+        return SimpleNamespace(width=width, is_moving=False, is_grasped=False)
+
+
+def connect_gripper_via_nuc(nuc_ip: str, retries: int = 5):
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            gripper = NucGripperProxy(nuc_ip)
+            state = gripper.get_state()
+            print(f"Connected to gripper via NUC {nuc_ip}:4242")
+            print(f"Initial state: {format_gripper_state(state, gripper.max_width)}")
+            return gripper, gripper.max_width
+        except Exception as exc:
+            last_err = exc
+            print(f"NUC gripper connect attempt {attempt}/{retries} failed: {exc}")
+            time.sleep(2.0)
+    raise RuntimeError(
+        "Could not reach gripper via NUC. Ensure on NUC:\n"
+        "  1. bash droid/franka/launch_gripper.sh  (or openpi_start_gripper_nuc.sh from workstation)\n"
+        "  2. Polymetis + zerorpc :4242 running\n"
+        "  3. Patched robot.py synced to NUC"
     ) from last_err
 
 
@@ -212,6 +255,111 @@ class HandCameraPreview:
     def close(self):
         if self._cam.is_opened():
             self._cam.close()
+
+
+class TeleopCamerasPreview:
+    """VR teleop monitor: hand ZED (RGB+depth) + both third-person ZED 2i (RGB)."""
+
+    def __init__(
+        self,
+        hand_serial: str,
+        third_left_serial: str,
+        third_right_serial: str,
+        hand_w: int = 640,
+        hand_h: int = 480,
+        third_w: int = 640,
+        third_h: int = 480,
+        fps: int = 15,
+    ):
+        import cv2
+        import pyzed.sl as sl
+
+        self.sl = sl
+        self.cv2 = cv2
+        self.hand_h = hand_h
+        self.third_h = third_h
+        self.hand_w = hand_w
+        self.third_w = third_w
+        self._blank_hand = np.zeros((hand_h, hand_w * 2, 3), dtype=np.uint8)
+        self._blank_third = np.zeros((third_h, third_w * 2, 3), dtype=np.uint8)
+        self._last_hand = self._blank_hand.copy()
+        self._last_third = self._blank_third.copy()
+
+        def _open(serial: str, depth_mode, label: str):
+            cam = sl.Camera()
+            init = sl.InitParameters()
+            init.set_from_serial_number(int(serial))
+            init.camera_resolution = sl.RESOLUTION.VGA
+            init.camera_fps = fps
+            init.depth_mode = depth_mode
+            init.coordinate_units = sl.UNIT.METER
+            init.depth_minimum_distance = 0.1
+            init.depth_maximum_distance = 5.0
+            status = cam.open(init)
+            if status != sl.ERROR_CODE.SUCCESS:
+                raise RuntimeError(f"Failed to open {label} camera {serial}: {status}")
+            print(f"Teleop preview: opened {label} ZED {serial}")
+            return cam
+
+        self._hand = _open(hand_serial, sl.DEPTH_MODE.PERFORMANCE, "hand")
+        self._third_left = _open(third_left_serial, sl.DEPTH_MODE.NONE, "third-person L")
+        self._third_right = _open(third_right_serial, sl.DEPTH_MODE.NONE, "third-person R")
+
+        self._hand_image = sl.Mat()
+        self._hand_depth = sl.Mat()
+        self._third_l_image = sl.Mat()
+        self._third_r_image = sl.Mat()
+        self._hand_runtime = sl.RuntimeParameters()
+        self._third_runtime = sl.RuntimeParameters()
+
+        canvas_w = max(hand_w * 2, third_w * 2)
+        self._canvas = np.zeros((hand_h + third_h, canvas_w, 3), dtype=np.uint8)
+
+    def _grab_rgb(self, cam, image_mat, width, height):
+        if cam.grab(self._third_runtime) != self.sl.ERROR_CODE.SUCCESS:
+            return None
+        cam.retrieve_image(image_mat, self.sl.VIEW.LEFT)
+        rgb = image_mat.get_data().copy()
+        if rgb.shape[2] == 4:
+            rgb = rgb[:, :, :3]
+        if rgb.shape[:2] != (height, width):
+            rgb = self.cv2.resize(rgb, (width, height))
+        return rgb
+
+    def read(self):
+        if self._hand.grab(self._hand_runtime) == self.sl.ERROR_CODE.SUCCESS:
+            self._hand.retrieve_image(self._hand_image, self.sl.VIEW.LEFT)
+            rgb = self._hand_image.get_data().copy()
+            if rgb.shape[2] == 4:
+                rgb = rgb[:, :, :3]
+            if rgb.shape[:2] != (self.hand_h, self.hand_w):
+                rgb = self.cv2.resize(rgb, (self.hand_w, self.hand_h))
+
+            self._hand.retrieve_measure(self._hand_depth, self.sl.MEASURE.DEPTH)
+            depth_color = _colorize_depth(self._hand_depth.get_data())
+            if depth_color.shape[:2] != (self.hand_h, self.hand_w):
+                depth_color = self.cv2.resize(depth_color, (self.hand_w, self.hand_h))
+
+            self.cv2.putText(rgb, "Hand RGB", (8, 24), self.cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            self.cv2.putText(depth_color, "Hand depth", (8, 24), self.cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            self._last_hand = np.hstack([rgb, depth_color])
+
+        left_rgb = self._grab_rgb(self._third_left, self._third_l_image, self.third_w, self.third_h)
+        right_rgb = self._grab_rgb(self._third_right, self._third_r_image, self.third_w, self.third_h)
+        if left_rgb is not None and right_rgb is not None:
+            self.cv2.putText(left_rgb, "Third-person L", (8, 24), self.cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            self.cv2.putText(right_rgb, "Third-person R", (8, 24), self.cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            self._last_third = np.hstack([left_rgb, right_rgb])
+
+        canvas_w = self._canvas.shape[1]
+        self._canvas[: self.hand_h, : self.hand_w * 2] = self._last_hand
+        self._canvas[self.hand_h :, : self.third_w * 2] = self._last_third
+        return self._canvas
+
+    def close(self):
+        for cam in (self._hand, self._third_left, self._third_right):
+            if cam.is_opened():
+                cam.close()
 
 
 def run_with_cameras(
@@ -407,8 +555,14 @@ class _AllCamerasPreview:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Robotiq 2F gripper demo (DROID-style)")
-    parser.add_argument("--gripper-ip", default="localhost", help="Gripper gRPC server IP")
-    parser.add_argument("--gripper-port", type=int, default=50052, help="Gripper gRPC server port")
+    parser.add_argument("--nuc-ip", default=None, help="NUC IP for gripper via zerorpc (default: parameters.nuc_ip)")
+    parser.add_argument(
+        "--local-gripper",
+        action="store_true",
+        help="Connect to local gRPC gripper (workstation USB) instead of NUC",
+    )
+    parser.add_argument("--gripper-ip", default="localhost", help="Local gripper gRPC server IP (--local-gripper only)")
+    parser.add_argument("--gripper-port", type=int, default=50052, help="Local gripper gRPC port (--local-gripper only)")
     parser.add_argument("--cycles", type=int, default=2, help="Number of open/close/open cycles")
     parser.add_argument(
         "--speed",
@@ -442,7 +596,17 @@ def main():
     GripperInterface = load_gripper_interface()
 
     args = parse_args()
-    gripper, max_width = connect_gripper(args.gripper_ip, args.gripper_port)
+    sys.path.insert(0, str(ROOT))
+    from droid.misc.parameters import nuc_ip
+
+    if args.local_gripper:
+        gripper, max_width = connect_gripper(args.gripper_ip, args.gripper_port)
+    else:
+        target_nuc = args.nuc_ip or nuc_ip
+        if not target_nuc:
+            print("ERROR: nuc_ip not set — use --nuc-ip or set droid/misc/parameters.py")
+            sys.exit(1)
+        gripper, max_width = connect_gripper_via_nuc(target_nuc)
 
     print(
         f"\nStarting demo: {args.cycles} cycle(s), speed={args.speed}, force={args.force}"

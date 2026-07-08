@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DROID-style VR teleop: Quest right controller → Franka arm (NUC) + Robotiq gripper (local).
+DROID-style VR teleop: Quest right controller → Franka arm + Robotiq gripper (both via NUC).
 
 Matches scripts/tests/collect_trajectory.py + droid/controllers/oculus_controller.VRPolicy:
   - RG (side grip): enable teleop (arm + gripper)
@@ -10,16 +10,12 @@ Matches scripts/tests/collect_trajectory.py + droid/controllers/oculus_controlle
   - A / B: success / failure flags (UI only here)
 
 Prerequisites:
-  NUC: Polymetis + zerorpc on :4242 (see .cursor/skills/control-arm-via-nuc/SKILL.md)
+  NUC: Polymetis + zerorpc :4242 + gripper server :50052 (see nuc-admin.md)
   Desk: Unlock brakes → Activate FCI
 
-  Terminal 1 — gripper server (workstation USB):
-    conda activate polymetis-local
-    cd /home/pci/Desktop/DROID
-    bash droid/franka/launch_gripper.sh
-
-  Terminal 2 — VR teleop:
+  VR teleop (workstation):
     export PATH="$HOME/platform-tools:$PATH"
+    adb devices    # must show Quest as "device" before starting
     conda activate robot
     cd /home/pci/Desktop/DROID
     python scripts/demo/vr_teleop_demo.py
@@ -32,7 +28,9 @@ NUC recovery (from workstation, after Desk → Activate FCI):
 
 Optional cameras:
     python scripts/demo/vr_teleop_demo.py --show-cameras
+      # hand RGB+depth + both third-person RGB
     python scripts/demo/vr_teleop_demo.py --show-cameras --all-cameras
+      # all 3 ZEDs with RGB+depth per camera (heavier USB load)
 
 Dry-run (no robot commands):
     python scripts/demo/vr_teleop_demo.py --dry-run
@@ -42,6 +40,7 @@ On launch the arm moves to DROID home joints and the gripper opens (skip with --
 
 import argparse
 import importlib.util
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -52,7 +51,8 @@ from matplotlib.animation import FuncAnimation
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTROL_HZ = 15
-ZERORPC_TIMEOUT_S = 10
+ZERORPC_TIMEOUT_S = 30
+LAUNCH_ROBOT_TIMEOUT_S = 45
 
 # DROID default home joints (see droid/robot_env.py reset_joints)
 RESET_JOINTS = np.array([0, -1 / 5 * np.pi, 0, -4 / 5 * np.pi, 0, 3 / 5 * np.pi, 0.0])
@@ -78,6 +78,41 @@ def _require_robot_env(dry_run: bool):
         sys.exit(1)
 
 
+def _preflight_quest():
+    """Fail fast before homing the arm if Quest is not visible to adb."""
+    adb = "adb"
+    try:
+        out = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=5).stdout
+    except FileNotFoundError:
+        print("ERROR: adb not found. Add platform-tools to PATH:")
+        print("  export PATH=\"$HOME/platform-tools:$PATH\"")
+        print("  bash scripts/setup/quest3_adb_setup.sh")
+        sys.exit(1)
+
+    if "\tdevice" not in out:
+        print("ERROR: no Quest visible to adb (USB debugging not ready).")
+        print("  adb devices output:")
+        for line in out.strip().splitlines():
+            print(f"    {line}")
+        print("\nFix:")
+        print("  1. Plug Quest into workstation with USB-C data cable")
+        print("  2. export PATH=\"$HOME/platform-tools:$PATH\"")
+        print("  3. Put on headset → Allow USB debugging → Always allow")
+        print("  4. adb devices   # must show: <serial>    device")
+        print("  5. Optional: adb shell am broadcast -a com.oculus.vrpowermanager.prox_close")
+        print("  6. Diagnose: python scripts/setup/test_oculus_reader.py")
+        print("\nFirst-time setup: bash scripts/setup/quest3_adb_setup.sh")
+        sys.exit(1)
+
+    serial = next(line.split()[0] for line in out.splitlines() if "\tdevice" in line)
+    print(f"Quest adb OK ({serial})")
+    subprocess.run(
+        [adb, "shell", "am broadcast", "-a", "com.oculus.vrpowermanager.prox_close"],
+        capture_output=True,
+        timeout=5,
+    )
+
+
 def _load_gripper_demo():
     path = ROOT / "scripts" / "demo" / "robotiq_gripper_demo.py"
     spec = importlib.util.spec_from_file_location("robotiq_gripper_demo", path)
@@ -86,14 +121,38 @@ def _load_gripper_demo():
     return mod
 
 
+def _preflight_nuc(nuc_ip: str):
+    """Fail fast with actionable message if NUC ports are down."""
+    import socket
+
+    def _port_open(host, port, timeout=2.0):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    if not _port_open(nuc_ip, 4242):
+        print(f"ERROR: NUC zerorpc not reachable at {nuc_ip}:4242")
+        print("Start the NUC stack:")
+        print("  bash scripts/setup/openpi_start_nuc_stack.sh")
+        print("Or step by step: openpi_start_gripper_nuc.sh → polymetis → zerorpc")
+        sys.exit(1)
+
+    if not _port_open(nuc_ip, 50052):
+        print(f"WARN: NUC gripper port {nuc_ip}:50052 not open.")
+        print("  bash scripts/setup/openpi_start_gripper_nuc.sh")
+        print("launch_robot may proceed without gripper if server is still starting...")
+
+
 def _print_arm_recovery():
     print(
         "\n=== ARM UNAVAILABLE — VR teleop cannot move the Franka ===\n"
         "Common causes:\n"
         "  • Polymetis state buffer empty (FCI off or franka_panda_client dead)\n"
         "  • NUC zerorpc hung after a reflex / communication_constraints_violation\n"
-        "  • launch_robot timed out — NUC zerorpc stuck on GripperInterface (gripper is on workstation)\n"
-        "    Fix: sync robot.py to NUC, restart zerorpc (see nuc-admin.md)\n"
+        "  • launch_robot timed out — NUC gripper gRPC hung or stack not started\n"
+        "    Fix: bash scripts/setup/openpi_start_nuc_stack.sh (see nuc-admin.md)\n"
         "\nFix (workstation Desk browser):\n"
         "  1. https://192.168.1.11/desk/ → Unlock brakes → Execution → Activate FCI\n"
         "\nFix (NUC — see .cursor/skills/control-arm-via-nuc/nuc-admin.md):\n"
@@ -113,7 +172,8 @@ def connect_arm(nuc_ip: str, dry_run: bool):
         print("DRY-RUN: skipping NUC connection")
         return None
 
-    print(f"Connecting to NUC arm at {nuc_ip}:4242 (timeout {ZERORPC_TIMEOUT_S}s)...")
+    print(f"Connecting to NUC at {nuc_ip}:4242 (zerorpc timeout {ZERORPC_TIMEOUT_S}s)...")
+    _preflight_nuc(nuc_ip)
     try:
         robot = ServerInterface(ip_address=nuc_ip, launch=False, timeout=ZERORPC_TIMEOUT_S)
     except Exception as exc:
@@ -121,17 +181,27 @@ def connect_arm(nuc_ip: str, dry_run: bool):
         _print_arm_recovery()
         raise SystemExit(1) from exc
 
+    # launch_robot can block on NUC while connecting gripper gRPC — use longer timeout.
+    robot.server.timeout = LAUNCH_ROBOT_TIMEOUT_S
     try:
         robot.launch_robot()
         print("launch_robot OK")
-    except zerorpc.exceptions.RemoteError:
-        print("launch_robot skipped (NUC gripper absent — expected)")
+    except zerorpc.exceptions.RemoteError as err:
+        print(f"launch_robot failed: {err}")
+        _print_arm_recovery()
+        raise SystemExit(1) from err
     except zerorpc.exceptions.TimeoutExpired as err:
-        print(f"ERROR: launch_robot timed out: {err}")
+        print(f"ERROR: launch_robot timed out after {LAUNCH_ROBOT_TIMEOUT_S}s: {err}")
+        print("Most likely: gripper server on NUC not ready. Run:")
+        print("  bash scripts/setup/openpi_start_nuc_stack.sh")
+        print("  scp droid/franka/robot.py nuc:/home/pci/Desktop/Franka/droid/droid/franka/robot.py")
+        print("  bash scripts/setup/openpi_start_zerorpc.sh")
         _print_arm_recovery()
         raise SystemExit(1) from err
     except Exception as exc:
         print(f"launch_robot skipped ({exc.__class__.__name__})")
+
+    robot.server.timeout = ZERORPC_TIMEOUT_S
 
     try:
         state, _ = robot.get_robot_state()
@@ -172,18 +242,18 @@ def reset_arm_home(robot):
         raise SystemExit(1) from err
 
 
-def open_local_gripper(gripper, max_width, gd, speed, force):
-    """Open workstation Robotiq gripper before teleop."""
-    print("Opening local gripper...")
-    gripper.goto(width=max_width, speed=speed, force=force, blocking=True)
-    state = gripper.get_state()
-    pos = gd.droid_width_to_position(state.width, max_width)
-    print(f"Gripper open. width={state.width:.4f} m  position={pos:.3f}")
+def open_nuc_gripper(robot):
+    """Open Robotiq gripper on NUC before teleop."""
+    print("Opening gripper on NUC...")
+    robot.update_gripper(0.0, velocity=False, blocking=True)
+    state, _ = robot.get_robot_state()
+    print(f"Gripper open OK. position={state['gripper_position']:.3f}")
 
 
-def read_gripper_position(gripper, max_width, gd):
+def read_gripper_position(robot, max_width):
     try:
-        return gd.droid_width_to_position(gripper.get_state().width, max_width)
+        state, _ = robot.get_robot_state()
+        return float(state["gripper_position"])
     except Exception:
         return 0.0
 
@@ -261,19 +331,21 @@ def trigger_value(buttons):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Quest VR teleop — Franka arm (NUC) + Robotiq gripper")
+    parser = argparse.ArgumentParser(description="Quest VR teleop — Franka arm + Robotiq gripper (NUC)")
     parser.add_argument("--nuc-ip", default=None, help="NUC IP (default: droid/misc/parameters.py nuc_ip)")
-    parser.add_argument("--gripper-ip", default="localhost")
-    parser.add_argument("--gripper-port", type=int, default=50052)
-    parser.add_argument("--speed", type=float, default=0.05)
-    parser.add_argument("--force", type=float, default=0.1)
-    parser.add_argument("--show-cameras", action="store_true")
-    parser.add_argument("--all-cameras", action="store_true")
+    parser.add_argument("--max-gripper-width", type=float, default=0.085, help="Robotiq max width (m) for UI")
+    parser.add_argument("--show-cameras", action="store_true", help="Hand RGB+depth + both third-person RGB")
+    parser.add_argument("--all-cameras", action="store_true", help="All 3 ZEDs RGB+depth each (heavy USB)")
     parser.add_argument("--dry-run", action="store_true", help="Log VR actions without sending robot commands")
     parser.add_argument(
         "--no-reset-arm",
         action="store_true",
         help="Skip moving arm to DROID home pose and opening gripper at startup",
+    )
+    parser.add_argument(
+        "--no-quest-preflight",
+        action="store_true",
+        help="Skip adb Quest check (not recommended)",
     )
     args = parser.parse_args()
     _require_robot_env(args.dry_run)
@@ -288,27 +360,40 @@ def main():
         sys.exit(1)
 
     gd = _load_gripper_demo()
-    gd.GripperInterface = gd.load_gripper_interface()
-    gripper, max_width = gd.connect_gripper(args.gripper_ip, args.gripper_port)
+
+    if not args.no_quest_preflight:
+        _preflight_quest()
 
     robot = connect_arm(nuc, args.dry_run)
+    max_width = args.max_gripper_width
 
     if not args.dry_run and not args.no_reset_arm and robot is not None:
         reset_arm_home(robot)
-        open_local_gripper(gripper, max_width, gd, args.speed, args.force)
+        open_nuc_gripper(robot)
 
     camera_preview = None
     if args.show_cameras:
+        from droid.misc.parameters import hand_camera_id, varied_camera_1_id, varied_camera_2_id
+
         if args.all_cameras:
             camera_preview = gd._AllCamerasPreview()
         else:
-            camera_preview = gd.HandCameraPreview()
+            for name, serial in (
+                ("hand_camera_id", hand_camera_id),
+                ("varied_camera_1_id", varied_camera_1_id),
+                ("varied_camera_2_id", varied_camera_2_id),
+            ):
+                if not serial:
+                    print(f"ERROR: {name} empty in droid/misc/parameters.py")
+                    print("Run: python scripts/setup/list_zed_cameras.py")
+                    sys.exit(1)
+            camera_preview = gd.TeleopCamerasPreview(
+                hand_camera_id, varied_camera_1_id, varied_camera_2_id
+            )
 
     print("Starting VRPolicy (OculusReader thread) — keep right controller visible.")
     controller = VRPolicy(right_controller=True)
 
-    last_gripper_cmd_time = 0.0
-    gripper_min_interval = 1.0 / CONTROL_HZ
     last_status_print = 0.0
     arm_status = "ok"
     consecutive_arm_errors = 0
@@ -318,7 +403,7 @@ def main():
     ax_ui = fig.add_subplot(111)
 
     def update(_frame):
-        nonlocal last_gripper_cmd_time, last_status_print, arm_status, consecutive_arm_errors
+        nonlocal last_status_print, arm_status, consecutive_arm_errors
 
         ax_ui.cla()
         if camera_preview is not None:
@@ -335,11 +420,8 @@ def main():
         buttons = controller._state.get("buttons", {})
         trig = trigger_value(buttons)
 
-        gripper_pos = read_gripper_position(gripper, max_width, gd)
-        try:
-            gripper_width = gripper.get_state().width
-        except Exception:
-            gripper_width = gd.droid_position_to_width(gripper_pos, max_width)
+        gripper_pos = read_gripper_position(robot, max_width) if robot else 0.0
+        gripper_width = gd.droid_position_to_width(gripper_pos, max_width)
 
         info_dict = {}
         ee_pos = None
@@ -359,21 +441,16 @@ def main():
                     action, info_dict = controller.forward(obs, include_info=True)
 
                     if movement_enabled:
-                        arm_action = np.concatenate([action[:6], [0.0]])
+                        grip_target = float(
+                            np.clip(info_dict.get("target_gripper_position", gripper_pos), 0.0, 1.0)
+                        )
+                        full_action = np.concatenate([action[:6], [grip_target]])
                         robot.update_command(
-                            arm_action,
+                            full_action,
                             action_space="cartesian_velocity",
-                            gripper_action_space="velocity",
+                            gripper_action_space="position",
                             blocking=False,
                         )
-
-                    if movement_enabled and "target_gripper_position" in info_dict:
-                        now = time.time()
-                        if now - last_gripper_cmd_time >= gripper_min_interval:
-                            target = float(np.clip(info_dict["target_gripper_position"], 0.0, 1.0))
-                            width = gd.droid_position_to_width(target, max_width)
-                            gripper.goto(width=width, speed=args.speed, force=args.force, blocking=False)
-                            last_gripper_cmd_time = now
 
                 consecutive_arm_errors = 0
 

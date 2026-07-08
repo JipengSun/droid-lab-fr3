@@ -5,6 +5,7 @@ from cv2 import aruco
 nuc_ip = "192.168.1.7"
 robot_ip = "192.168.1.11"
 laptop_ip = "192.168.1.6"
+gripper_on_nuc = True  # Robotiq USB on NUC; gripper gRPC at nuc_ip:50052 via zerorpc
 sudo_password = ""
 robot_type = "fr3"  # 'panda' or 'fr3'
 robot_serial_number = ""

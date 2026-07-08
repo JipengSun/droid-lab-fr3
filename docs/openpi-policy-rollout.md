@@ -19,7 +19,20 @@ Run a **pre-trained language-conditioned manipulation policy** on this lab’s D
 
 ## New session startup (copy-paste)
 
-Run these **in order** every time you start a fresh experiment. All shell commands are from the **workstation** unless noted.
+**One command (fresh start everything + rollout):**
+
+```bash
+cd ~/Desktop/DROID
+bash scripts/demo/start_pi05_demo.sh
+```
+
+**Dry run only** (cameras + inference, no motion):
+
+```bash
+bash scripts/demo/start_pi05_demo.sh --dry-run
+```
+
+Manual steps below if you prefer step-by-step.
 
 **You need:** 1 browser tab (Desk) + **up to 4 terminal windows** on the workstation (A: NUC/verify, B: gripper, C: policy, D: rollout — you may reuse A for rollout).
 

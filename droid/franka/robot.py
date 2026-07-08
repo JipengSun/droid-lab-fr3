@@ -1,5 +1,6 @@
 # ROBOT SPECIFIC IMPORTS
 import os
+import threading
 import time
 
 import grpc
@@ -13,6 +14,24 @@ from droid.misc.subprocess_utils import run_terminal_command, run_threaded_comma
 # UTILITY SPECIFIC IMPORTS
 from droid.misc.transformations import add_poses, euler_to_quat, pose_diff, quat_to_euler
 from droid.robot_ik.robot_ik_solver import RobotIKSolver
+
+
+def _connect_gripper_with_timeout(ip_address="localhost", port=50052, timeout_s=5.0):
+    """Avoid blocking zerorpc if gripper gRPC is down or hung."""
+    result = {"gripper": None, "error": None}
+
+    def _run():
+        try:
+            result["gripper"] = GripperInterface(ip_address=ip_address, port=port)
+        except Exception as err:
+            result["error"] = err
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+    if thread.is_alive():
+        return None
+    return result["gripper"]
 
 
 class FrankaRobot:
@@ -36,17 +55,15 @@ class FrankaRobot:
         self._robot = RobotInterface(ip_address="localhost")
         self._gripper = None
         self._max_gripper_width = 0.085  # Robotiq 2F-85 default; used only if gripper connected
-        # Gripper USB is on the workstation in this lab — skip NUC GripperInterface unless
-        # explicitly enabled (otherwise launch_robot blocks zerorpc waiting for :50052).
-        if os.environ.get("DROID_GRIPPER_LOCAL", "").lower() in ("1", "true", "yes"):
-            try:
-                gripper = GripperInterface(ip_address="localhost")
+        # Robotiq USB is on the NUC in this lab — connect localhost:50052 by default.
+        # Set DROID_GRIPPER_SKIP=1 to skip when no gripper server is running.
+        if os.environ.get("DROID_GRIPPER_SKIP", "").lower() not in ("1", "true", "yes"):
+            gripper = _connect_gripper_with_timeout(ip_address="localhost", port=50052, timeout_s=5.0)
+            if gripper is not None:
                 metadata = getattr(gripper, "metadata", None)
                 if metadata is not None and metadata.max_width > 0:
                     self._gripper = gripper
                     self._max_gripper_width = metadata.max_width
-            except Exception:
-                pass
         self._ik_solver = RobotIKSolver()
         self._controller_not_loaded = False
 

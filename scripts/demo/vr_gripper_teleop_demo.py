@@ -7,12 +7,9 @@ For full arm + gripper teleop (DROID VRPolicy + NUC), use:
   python scripts/demo/vr_teleop_demo.py
 
 Prerequisites:
-  Terminal 1 — gripper server:
-    conda activate polymetis-local
-    cd /home/pci/Desktop/DROID
-    bash droid/franka/launch_gripper.sh
+  NUC: gripper server + zerorpc (see scripts/setup/openpi_start_gripper_nuc.sh)
 
-  Terminal 2 — this demo (Quest USB connected):
+  Terminal — this demo (Quest USB connected):
     export PATH="$HOME/platform-tools:$PATH"
     adb shell am broadcast -a com.oculus.vrpowermanager.prox_close   # keep headset awake
     conda activate robot
@@ -117,8 +114,10 @@ def draw_ui_panel(ax, trig, rg, pressed_a, pressed_b, gripper_pos, gripper_width
 
 def main():
     parser = argparse.ArgumentParser(description="Quest right controller → Robotiq gripper teleop")
-    parser.add_argument("--ip", default="localhost", help="Gripper gRPC host")
-    parser.add_argument("--port", type=int, default=50052, help="Gripper gRPC port")
+    parser.add_argument("--nuc-ip", default=None, help="NUC IP (default: parameters.nuc_ip)")
+    parser.add_argument("--local-gripper", action="store_true", help="Use workstation USB gripper instead")
+    parser.add_argument("--ip", default="localhost", help="Local gripper gRPC host (--local-gripper only)")
+    parser.add_argument("--port", type=int, default=50052, help="Local gripper gRPC port (--local-gripper only)")
     parser.add_argument("--speed", type=float, default=0.05, help="Gripper goto speed")
     parser.add_argument("--force", type=float, default=0.1, help="Gripper goto force")
     parser.add_argument("--show-cameras", action="store_true", help="Show ZED camera preview(s)")
@@ -143,15 +142,29 @@ def main():
         _preflight_quest()
 
     gd = _load_gripper_demo()
-    gd.GripperInterface = gd.load_gripper_interface()
-    gripper, max_width = gd.connect_gripper(args.ip, args.port)
+    from droid.misc.parameters import nuc_ip
+
+    if args.local_gripper:
+        gd.GripperInterface = gd.load_gripper_interface()
+        gripper, max_width = gd.connect_gripper(args.ip, args.port)
+    else:
+        target_nuc = args.nuc_ip or nuc_ip
+        if not target_nuc:
+            print("ERROR: nuc_ip not set")
+            sys.exit(1)
+        gripper, max_width = gd.connect_gripper_via_nuc(target_nuc)
 
     camera_preview = None
     if args.show_cameras:
+        from droid.misc.parameters import hand_camera_id
+
         if args.all_cameras:
             camera_preview = gd._AllCamerasPreview()
         else:
-            camera_preview = gd.HandCameraPreview()
+            if not hand_camera_id:
+                print("ERROR: hand_camera_id empty in droid/misc/parameters.py")
+                sys.exit(1)
+            camera_preview = gd.HandCameraPreview(hand_camera_id)
 
     print("Starting VRPolicy — keep right controller visible to the headset.")
     controller = VRPolicy(right_controller=True)

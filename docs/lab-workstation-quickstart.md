@@ -12,12 +12,12 @@ Repo path: `/home/pci/Desktop/DROID`
 | Component | Machine | Notes |
 |-----------|---------|--------|
 | Franka arm (FCI) | NUC → robot | Polymetis + zerorpc `:4242` on NUC |
-| Robotiq 2F gripper | **Workstation USB** | `launch_gripper.sh` on laptop |
+| Robotiq 2F gripper | **NUC USB** | `launch_gripper.sh` on NUC (`:50052`) |
 | 3× ZED cameras | Workstation USB | hand ZED-M + 2× ZED 2i |
 | Quest 3 VR | Workstation USB | `oculus_reader` + teleop APK |
 | Desk (FCI unlock) | **Workstation browser** | https://192.168.1.11/desk/ |
 
-Gripper is **not** on the NUC. Arm commands go over the network; gripper commands stay local.
+Gripper USB is on the **NUC**. Arm and gripper commands both go over zerorpc (`:4242`).
 
 ---
 
@@ -66,7 +66,8 @@ Quest 3 may need a newer teleop APK — see output of `test_oculus_reader.py`.
 
 - Confirm `droid/misc/parameters.py`: `nuc_ip = "192.168.1.7"`, `robot_type = "fr3"`.
 - NUC must run Polymetis + `python scripts/server/run_server.py` (zerorpc).
-- Patched `droid/franka/robot.py` on NUC skips local gripper (gripper is on workstation).
+- NUC must run Polymetis + zerorpc + gripper server (see `openpi_start_gripper_nuc.sh`).
+- `droid/franka/robot.py` on NUC connects gripper on `localhost:50052` by default.
 
 Details: `.cursor/skills/control-arm-via-nuc/SKILL.md` and `docs/nuc-agent-instructions.md`.
 
@@ -85,7 +86,7 @@ Details: `.cursor/skills/control-arm-via-nuc/SKILL.md` and `docs/nuc-agent-instr
 ```bash
 ping -c 2 192.168.1.7
 nc -zv 192.168.1.7 4242    # NUC zerorpc
-nc -zv localhost 50052     # local gripper (after launch_gripper.sh)
+nc -zv 192.168.1.7 50052   # NUC gripper (after openpi_start_gripper_nuc.sh)
 ```
 
 ### C. Arm smoke test
@@ -98,40 +99,51 @@ python scripts/demo/arm_smoke_test.py
 
 Expect joint positions and EE pose within ~1 s. If timeout → see [Troubleshooting](#troubleshooting).
 
-### D. Quest awake (optional, if not wearing headset)
+### D. Quest (required for VR teleop)
 
 ```bash
 export PATH="$HOME/platform-tools:$PATH"
+adb devices    # must show: <serial>    device
+```
+
+If empty or `unauthorized`: plug USB-C data cable, put on headset, tap **Allow USB debugging** → **Always allow**. First time: `bash scripts/setup/quest3_adb_setup.sh`.
+
+Keep headset awake without wearing it (optional):
+
+```bash
 adb shell am broadcast -a com.oculus.vrpowermanager.prox_close
+```
+
+Quick diagnostic:
+
+```bash
+python scripts/setup/test_oculus_reader.py
 ```
 
 ---
 
 ## Workflows
 
-Always use **`conda activate robot`** (or `polymetis-local` for gripper server only).  
-Always **`cd /home/pci/Desktop/DROID`** before running scripts.
+**Featured demo:** [VR teleop (Quest → arm + gripper)](vr-teleop-demo.md) — `scripts/demo/vr_teleop_demo.py`
+
+Always use **`conda activate robot`**. Always **`cd /home/pci/Desktop/DROID`** before running scripts.
 
 ---
 
-### 1. Gripper only (no arm)
+### 1. Gripper only (via NUC)
 
-**Terminal 1 — gripper server:**
-```bash
-conda activate polymetis-local
-cd /home/pci/Desktop/DROID
-bash droid/franka/launch_gripper.sh
-# wait for: Activated. + Gripper server running at 0.0.0.0:50052
-```
+Start gripper server on NUC, then run demo from workstation:
 
-**Terminal 2 — demo:**
 ```bash
+bash scripts/setup/openpi_start_gripper_nuc.sh
 conda activate robot
 cd /home/pci/Desktop/DROID
 python scripts/demo/robotiq_gripper_demo.py
 python scripts/demo/robotiq_gripper_demo.py --show-cameras
 python scripts/demo/robotiq_gripper_demo.py --show-cameras --all-cameras
 ```
+
+Legacy workstation USB gripper: `python scripts/demo/robotiq_gripper_demo.py --local-gripper` (requires local `launch_gripper.sh`).
 
 ---
 
@@ -159,30 +171,65 @@ Skip composite: `--no-composite-video`
 
 ---
 
-### 3. VR teleop — arm + gripper (full setup)
+### 3. VR teleop — arm + gripper (primary demo)
 
-**Terminal 1 — gripper server** (same as above)
+**One command:**
 
-**Terminal 2 — VR teleop:**
+```bash
+cd ~/Desktop/DROID
+bash scripts/demo/start_vr_teleop_demo.sh
+```
+
+**Full runbook:** [vr-teleop-demo.md](vr-teleop-demo.md)
+
+#### Before you start
+
+Complete the [every-session checklist](#every-session--pre-flight-checklist):
+
+1. **Desk** — unlock brakes, **Activate FCI**
+2. **NUC stack** — gripper + Polymetis + zerorpc:
+   ```bash
+   bash scripts/setup/openpi_start_gripper_nuc.sh
+   bash scripts/setup/openpi_start_polymetis.sh && sleep 18 && bash scripts/setup/openpi_verify_polymetis.sh
+   bash scripts/setup/openpi_start_zerorpc.sh
+   ```
+3. **Arm smoke test** — `python scripts/demo/arm_smoke_test.py`
+4. **Quest USB** — `adb devices` shows `device`
+
 ```bash
 export PATH="$HOME/platform-tools:$PATH"
+adb devices    # must show Quest as "device" before starting
 conda activate robot
 cd /home/pci/Desktop/DROID
 python scripts/demo/vr_teleop_demo.py
 ```
 
-On launch the script **homes the arm** (DROID default joints) and **opens the gripper**.  
-Skip with `--no-reset-arm`.
+Optional — keep Quest awake without wearing it:
 
-**With camera preview on monitor:**
 ```bash
-python scripts/demo/vr_teleop_demo.py --show-cameras
-python scripts/demo/vr_teleop_demo.py --show-cameras --all-cameras
+adb shell am broadcast -a com.oculus.vrpowermanager.prox_close
+python scripts/demo/vr_teleop_demo.py
 ```
 
-**Test Quest mapping without moving arm:**
-```bash
-python scripts/demo/vr_teleop_demo.py --dry-run
+#### What happens on launch
+
+The script runs in this order:
+
+1. Connect NUC (`192.168.1.7:4242`) → `launch_robot OK` (arm + gripper)
+2. **Quest preflight** — fails fast if `adb devices` has no `device`
+3. **Home arm** to DROID default joints (blocking move)
+4. **Open gripper** on NUC
+5. Start `VRPolicy` / OculusReader thread → matplotlib status window
+
+```
+Connected to NUC at 192.168.1.7:4242
+Quest adb OK (<serial>)
+launch_robot OK
+Arm connected. EE xyz=(...)
+Resetting arm to DROID home pose (blocking)...
+Arm home OK. ...
+Opening gripper on NUC...
+Starting VRPolicy (OculusReader thread) — keep right controller visible.
 ```
 
 #### VR controls (right controller)
@@ -190,44 +237,96 @@ python scripts/demo/vr_teleop_demo.py --dry-run
 | Input | Effect |
 |-------|--------|
 | **RG** (side grip) | Enable teleop — hold while moving |
-| **Move / rotate controller** | Arm EE follows relative delta (6-DOF) |
-| **Index trigger** | Gripper open → closed |
+| **Move / rotate controller** | Arm EE follows relative 6-DOF delta |
+| **Index trigger** | Gripper open (0) → closed (1) |
 | **RJ** | Reset VR “forward” frame |
-| **A / B** | UI indicators only |
+| **A / B** | UI indicators only (green/red panel) |
 
-**Seeing the robot:** the Quest shows a **virtual teleop app**, not passthrough. Watch the **physical arm** or a **monitor** (`--show-cameras`), not the headset view.
+**Seeing the robot:** the Quest shows the **RAIL teleop VR app**, not passthrough. Watch the **physical arm** or a **monitor** (`--show-cameras`), not the headset view.
 
----
+#### Useful flags
 
-### 4. VR gripper only (no NUC arm)
+| Flag | Purpose |
+|------|---------|
+| `--show-cameras` | Hand RGB+depth + both third-person RGB on monitor |
+| `--show-cameras --all-cameras` | All 3 ZEDs, RGB+depth each (heavy USB) |
+| `--no-reset-arm` | Skip homing arm + opening gripper at startup |
+| `--dry-run` | Log VR actions only; no arm/gripper commands |
+| `--no-quest-preflight` | Skip adb check (not recommended) |
+| `--nuc-ip <ip>` | Override `droid/misc/parameters.py` |
+
+Examples:
+
+```bash
+python scripts/demo/vr_teleop_demo.py --show-cameras
+python scripts/demo/vr_teleop_demo.py --show-cameras --all-cameras
+python scripts/demo/vr_teleop_demo.py --no-reset-arm
+python scripts/demo/vr_teleop_demo.py --dry-run
+```
+
+#### Quest / adb troubleshooting
+
+| `adb devices` shows | Fix |
+|---------------------|-----|
+| (empty) | Plug USB-C **data** cable; headset on; run `adb kill-server && adb start-server` |
+| `unauthorized` | Put on headset → **Allow USB debugging** → **Always allow** |
+| `offline` | Unplug/replug; try another USB port |
+| Serial + `device` | OK — run teleop |
+
+If teleop exits with **Device not found**:
 
 ```bash
 export PATH="$HOME/platform-tools:$PATH"
+adb devices
+python scripts/setup/test_oculus_reader.py
+bash scripts/setup/quest3_adb_setup.sh   # first-time udev/plugdev
+```
+
+If arm preflight fails (`launch_robot` timeout / empty buffer): see [Troubleshooting](#troubleshooting) and `.cursor/skills/control-arm-via-nuc/nuc-admin.md`. You can still test gripper-only VR: [§4](#4-vr-gripper-only-no-nuc-arm).
+
+---
+
+### 4. VR gripper only (arm down)
+
+Script: `scripts/demo/vr_gripper_teleop_demo.py` — Quest controls gripper only via NUC (no arm motion).
+
+```bash
+bash scripts/setup/openpi_start_gripper_nuc.sh   # NUC gripper server
+export PATH="$HOME/platform-tools:$PATH"
+adb devices
 conda activate robot
 cd /home/pci/Desktop/DROID
-# gripper server must still be running in Terminal 1
 python scripts/demo/vr_gripper_teleop_demo.py
 ```
+
+If controller data is empty: `python scripts/setup/test_oculus_reader.py`
 
 ---
 
 ### 5. VR / controller test (virtual target, no robot)
 
+Good for learning RG + trigger **before** touching hardware (no gripper server, no NUC):
+
 ```bash
+export PATH="$HOME/platform-tools:$PATH"
+adb devices
 conda activate robot
 cd /home/pci/Desktop/DROID
 python scripts/demo/oculus_right_controller_demo.py
 ```
 
-Good for learning RG + trigger before touching hardware.
-
 ---
 
 ### 6. OpenPI π₀.5-DROID policy rollout (language / voice commands)
 
-Run a pre-trained VLA policy on the real robot. Requires OpenPI installed at `~/Desktop/openpi`.
+**One command:**
 
-**Full guide:** [OpenPI policy rollout](openpi-policy-rollout.md) — see **New session startup (copy-paste)** for the full checklist.
+```bash
+cd ~/Desktop/DROID
+bash scripts/demo/start_pi05_demo.sh
+```
+
+**Full guide:** [OpenPI policy rollout](openpi-policy-rollout.md)
 
 Abbreviated (after NUC + Desk are up):
 
@@ -251,9 +350,9 @@ PYTHONUNBUFFERED=1 python scripts/demo/openpi_pi05_rollout.py --external-camera 
 ┌──────────────── Workstation (192.168.1.6) ─────────────────┐
 │  Quest USB ──► VRPolicy / OculusReader                      │
 │  ZED USB   ──► zed_triple_camera_recorder                   │
-│  Gripper USB ──► launch_gripper.sh :50052                   │
+│  Gripper USB ──► NUC launch_gripper.sh :50052              │
 │       │                                                     │
-│       └── zerorpc ──► NUC :4242 ──► Polymetis ──► FR3 FCI  │
+│       └── zerorpc ──► NUC :4242 ──► Polymetis + gripper    │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -269,9 +368,10 @@ PYTHONUNBUFFERED=1 python scripts/demo/openpi_pi05_rollout.py --external-camera 
 | `ModuleNotFoundError: zerorpc` | Wrong conda env | `conda activate robot` |
 | `launch_robot timed out` | NUC zerorpc stuck on gripper probe | Sync `robot.py` to NUC, restart zerorpc; see `nuc-admin.md` |
 | `empty buffer` / arm timeout | FCI off or Polymetis dead | Desk → Activate FCI; relaunch Polymetis on NUC |
-| Gripper connect failed | Server not running | Terminal 1: `launch_gripper.sh` |
+| Gripper connect failed | NUC gripper server not running | `bash scripts/setup/openpi_start_gripper_nuc.sh` |
 | `import pyzed` fails | ZED SDK / group | `newgrp zed`, `configure_zed_env.sh` |
 | No controller data | Quest asleep / wrong APK | `test_oculus_reader.py`, `prox_close` |
+| `Device not found` / empty `adb devices` | Quest unplugged or not authorized | USB-C cable, headset on, Allow USB debugging; `quest3_adb_setup.sh` |
 | OpenCV mouse crash on recorder | Qt window timing | Use **r** key; script auto-fixes imshow order |
 | Arm moves at startup | Expected | `vr_teleop_demo.py` homes arm; use `--no-reset-arm` to skip |
 
@@ -299,6 +399,7 @@ PYTHONUNBUFFERED=1 python scripts/demo/openpi_pi05_rollout.py --external-camera 
 
 ## Related docs
 
+- **[VR teleop demo](vr-teleop-demo.md)** — primary Quest demo runbook
 - [Agent model handoff](agent-model-handoff.md) — onboarding for new policies (tiptop, etc.)
 - [NUC agent instructions](nuc-agent-instructions.md)
 - [Workstation agent handoff](workstation-agent-handoff.md)

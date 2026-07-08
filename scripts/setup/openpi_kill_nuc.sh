@@ -15,9 +15,11 @@ pkill -9 franka_panda_cl 2>/dev/null
 pkill -9 -f launch_robot.py 2>/dev/null
 pkill -9 -f "run_server -s" 2>/dev/null
 pkill -9 run_server 2>/dev/null
+pkill -f launch_gripper.py 2>/dev/null
+pkill -f launch_gripper.sh 2>/dev/null
 sleep 2
 echo "=== NUC ports (expect CLEAN) ==="
-ss -tlnp | grep -E "4242|50051" || echo CLEAN
+ss -tlnp | grep -E "4242|50051|50052" || echo CLEAN
 echo "=== NUC client (expect NO_CLIENT) ==="
 pgrep -a franka_panda_cl || echo NO_CLIENT
 echo "=== NUC servers (expect NO_SERVERS) ==="

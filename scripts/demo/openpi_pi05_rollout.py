@@ -2,10 +2,10 @@
 """Run π₀.5-DROID on this lab's Franka FR3 + ZED setup.
 
 Prerequisites (workstation):
-  1. NUC zerorpc up (192.168.1.7:4242), FCI activated in Desk
-  2. Gripper server: conda activate polymetis-local && bash droid/franka/launch_gripper.sh
-     (required — gripper USB is on the workstation, not the NUC)
-  3. Policy server (separate terminal):
+  1. NUC: Polymetis + zerorpc :4242 + gripper :50052 (FCI active in Desk)
+     bash scripts/setup/openpi_start_gripper_nuc.sh
+     bash scripts/setup/openpi_start_polymetis.sh && sleep 18 && bash scripts/setup/openpi_start_zerorpc.sh
+  2. Policy server (separate terminal):
        bash ~/Desktop/openpi/scripts/serve_pi05_droid.sh
 
 Usage:
@@ -58,7 +58,7 @@ class RolloutConfig:
     open_loop_horizon: int = 8
     remote_host: str = "127.0.0.1"
     remote_port: int = 8000
-    gripper_ip: str = "localhost"
+    gripper_ip: str = "localhost"  # deprecated; gripper is on NUC via RobotEnv
     gripper_port: int = 50052
     gripper_speed: float = 0.05
     gripper_force: float = 0.1
@@ -71,41 +71,6 @@ class RolloutConfig:
     whisper_model: str = "base"
     openpi_root: str = str(Path.home() / "Desktop/openpi")
     input_device: Optional[int] = None
-
-
-def _load_gripper_helpers():
-    path = ROOT / "scripts" / "demo" / "robotiq_gripper_demo.py"
-    spec = importlib.util.spec_from_file_location("robotiq_gripper_demo", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-class LocalGripper:
-    """Workstation Robotiq gripper — arm goes to NUC, gripper stays local (this lab)."""
-
-    def __init__(self, ip: str, port: int, speed: float, force: float):
-        gd = _load_gripper_helpers()
-        gd.GripperInterface = gd.load_gripper_interface()
-        self._gd = gd
-        self.gripper, self.max_width = gd.connect_gripper(ip, port)
-        self.speed = speed
-        self.force = force
-        self._last_cmd = None
-
-    def read_position(self) -> float:
-        return self._gd.droid_width_to_position(self.gripper.get_state().width, self.max_width)
-
-    def command(self, position: float, *, blocking: bool = False) -> None:
-        position = float(np.clip(position, 0.0, 1.0))
-        if self._last_cmd is not None and abs(position - self._last_cmd) < 1e-3:
-            return
-        width = self._gd.droid_position_to_width(position, self.max_width)
-        self.gripper.goto(width=width, speed=self.speed, force=self.force, blocking=blocking)
-        self._last_cmd = position
-
-    def open(self) -> None:
-        self.command(0.0, blocking=True)
 
 
 def listen_for_command(args: RolloutConfig, log) -> str:
@@ -255,26 +220,17 @@ def main(args: RolloutConfig):
     policy_client = websocket_client_policy.WebsocketClientPolicy(args.remote_host, args.remote_port)
     log("Connected to policy server: " + str(policy_client.get_server_metadata()))
 
-    log("Connecting to local Robotiq gripper (workstation USB)...")
-    local_gripper = LocalGripper(
-        args.gripper_ip, args.gripper_port, args.gripper_speed, args.gripper_force
-    )
-    log(f"Local gripper position: {local_gripper.read_position():.3f} (0=open, 1=closed)")
-
-    log("Starting RobotEnv (ZED cameras + NUC arm; may take 30-60s)...")
+    log("Starting RobotEnv (ZED cameras + NUC arm/gripper; may take 30-60s)...")
     env = RobotEnv(
         action_space="joint_velocity",
         gripper_action_space="position",
         do_reset=not args.no_reset,
     )
-    if not args.no_reset:
-        local_gripper.open()
-    log("DROID RobotEnv ready (NUC arm via zerorpc; gripper local).")
+    log("DROID RobotEnv ready (arm + gripper via NUC zerorpc).")
 
     obs = _extract_observation(
         args,
         env.get_observation(),
-        gripper_position=local_gripper.read_position(),
         save_to_disk=True,
     )
     dummy_request = {
@@ -308,7 +264,7 @@ def main(args: RolloutConfig):
         for t_step in bar:
             start_time = time.time()
             try:
-                gripper_pos = local_gripper.read_position()
+                gripper_pos = float(env.get_state()[0]["gripper_position"])
                 curr_obs = _extract_observation(
                     args, env.get_observation(), gripper_position=gripper_pos
                 )
@@ -345,7 +301,6 @@ def main(args: RolloutConfig):
                     log(f"step {t_step}: gripper raw={raw_gripper:.3f} -> cmd={gripper_cmd:.0f}  read={gripper_pos:.3f}")
 
                 env.step(action)
-                local_gripper.command(gripper_cmd, blocking=False)
 
                 elapsed_time = time.time() - start_time
                 if elapsed_time < 1 / DROID_CONTROL_FREQUENCY:

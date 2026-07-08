@@ -28,13 +28,12 @@
 
 ## 2026-06-05 — VR arm + gripper teleop
 
-- Full DROID teleop: `scripts/demo/vr_teleop_demo.py` — `VRPolicy` + `ServerInterface(launch=False)` @ 15 Hz (same as `collect_trajectory`).
-- RG enables arm (`cartesian_velocity` first 6 dims) and gripper (`target_gripper_position` → local `GripperInterface`); NUC gripper vel sent as 0.
-- Gripper-only: `scripts/demo/vr_gripper_teleop_demo.py`.
-- `vr_gripper_teleop_demo.py`: use `camera_preview.read()` not `.update()`; uses `VRPolicy` like full teleop; auto `prox_close` preflight; empty controller → run `test_oculus_reader.py`.
-- Pre-flight: FCI on Desk, NUC `:4242`, workstation `launch_gripper.sh`; use `--dry-run` to test Quest mapping without motion.
-- VR teleop fails when NUC Polymetis has **empty state buffer** or zerorpc hangs (often after `communication_constraints_violation` reflex). Relaunch Polymetis + zerorpc on NUC (`nuc-admin.md`); verify with `arm_smoke_test.py`. `ServerInterface` now uses zerorpc `timeout` (default 60s; demo uses 10s).
-- **`launch_robot` timeout on NUC:** `GripperInterface(localhost)` blocks zerorpc when gripper server is only on workstation. `robot.py` now skips gripper unless `DROID_GRIPPER_LOCAL=1`. Sync `droid/franka/robot.py` to NUC and restart `run_server.py`.
+- Full DROID teleop: `scripts/demo/vr_teleop_demo.py` — `VRPolicy` + NUC `ServerInterface` @ 15 Hz; arm + gripper both via zerorpc.
+- RG enables arm + gripper in one `update_command` (cartesian_velocity + gripper position).
+- Gripper-only: `scripts/demo/vr_gripper_teleop_demo.py` (NUC gripper via zerorpc).
+- Pre-flight: FCI on Desk, NUC stack (`openpi_start_gripper_nuc.sh` + Polymetis + zerorpc), Quest `adb devices`.
+- Runbook: `docs/vr-teleop-demo.md`.
+- `--dry-run` tests Quest mapping without robot motion; Quest must be `adb device` unless `--no-quest-preflight`.
 
 ## 2026-06-09 — Workstation agent skill (arm via NUC)
 
@@ -59,6 +58,27 @@
 ## 2026-06-10 — Agent model handoff doc
 
 - `docs/agent-model-handoff.md` — onboarding for agents integrating new policies (tiptop, etc.); reuse OpenPI rollout pattern, hardware split, golden rules.
+
+## 2026-07-08 — VR teleop pipeline test notes
+
+- Primary demo doc: `docs/vr-teleop-demo.md` — copy-paste session checklist for `vr_teleop_demo.py`.
+- Pipeline test needs: NUC reachable, FCI active (`nc -zv 192.168.1.11 1337`), NUC stack up, Quest `adb devices` shows `device` (not `unauthorized`).
+- `--dry-run` still starts OculusReader — unauthorized Quest fails before UI opens.
+- Demo launchers: `scripts/demo/start_vr_teleop_demo.sh`, `scripts/demo/start_pi05_demo.sh` — one command fresh-starts NUC stack + demo.
+
+
+## 2026-07-08 — Gripper moved to NUC
+
+- Robotiq USB is on the **NUC** (not workstation). `launch_gripper.sh` runs on NUC → `:50052`.
+- `droid/franka/robot.py`: gripper connects by default; `DROID_GRIPPER_SKIP=1` to opt out.
+- Workstation demos use NUC zerorpc for gripper (`robotiq_gripper_demo.py`, `vr_teleop_demo.py`, `RobotEnv`).
+- Start from workstation: `bash scripts/setup/openpi_start_gripper_nuc.sh`.
+- Legacy workstation gripper: `--local-gripper` flag on gripper demos.
+
+## 2026-06-10 — GitHub repo for lab setup
+
+- Lab branch `lab-fr3-setup` holds scripts/docs/patches; do **not** push using another user's SSH key — confirm `ssh -T git@github.com` shows the intended account before `git push`.
+- Polymetis lazy-import patch lives in `scripts/setup/patches/`; apply with `bash scripts/setup/apply_lab_patches.sh`.
 
 ## 2026-06-10 — Doc sync rule
 

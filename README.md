@@ -8,15 +8,17 @@ Lab fork of the [DROID robot platform](https://github.com/droid-dataset/droid) f
 
 ## What this repo is
 
-Upstream [droid-dataset/droid](https://github.com/droid-dataset/droid) targets a monolithic NUC setup (arm + gripper on one box). In our lab the **gripper USB, cameras, and VR headset are on the workstation**; the **NUC only runs Polymetis + zerorpc** for the arm. This repo captures that split and the scripts we use day to day.
+Upstream [droid-dataset/droid](https://github.com/droid-dataset/droid) targets a monolithic NUC setup (arm + gripper on one box). In our lab the **gripper USB is on the NUC**; **cameras and VR headset are on the workstation**. The NUC runs Polymetis, zerorpc, and the gripper server.
 
 | Piece | Where it runs |
 |-------|----------------|
 | Franka FR3 (FCI) | NUC → robot over Ethernet |
-| Robotiq gripper | Workstation USB (`launch_gripper.sh`) |
+| Robotiq gripper | **NUC USB** (`launch_gripper.sh` on NUC) |
 | 3× ZED (hand + 2 third-person) | Workstation USB |
-| Quest 3 teleop | Workstation USB |
+| Quest 3 VR teleop | Workstation USB |
 | Franka Desk (unlock / FCI) | Workstation browser |
+
+**Primary demo:** [VR teleop](docs/vr-teleop-demo.md) — `python scripts/demo/vr_teleop_demo.py`
 
 Default branch: **`lab-fr3-setup`**
 
@@ -54,14 +56,15 @@ Follow [docs/lab-workstation-quickstart.md](docs/lab-workstation-quickstart.md):
 - Quest / adb
 - Sync patched `droid/franka/robot.py` to the NUC
 
-### 3. Every session
+### 3. Every session (VR teleop)
 
 1. Desk → unlock brakes → **Activate FCI**
-2. NUC: Polymetis + `run_server.py` (zerorpc on `:4242`)
-3. Workstation: `bash droid/franka/launch_gripper.sh`
+2. NUC stack: `openpi_start_gripper_nuc.sh` → Polymetis → zerorpc (see [VR teleop demo](docs/vr-teleop-demo.md))
+3. `adb devices` → Quest shows `device`
 4. Smoke test: `python scripts/demo/arm_smoke_test.py`
+5. **VR teleop:** `python scripts/demo/vr_teleop_demo.py`
 
-Full checklist and demos: [lab-workstation-quickstart.md](docs/lab-workstation-quickstart.md).
+Full checklist: [lab-workstation-quickstart.md](docs/lab-workstation-quickstart.md) · **VR runbook:** [vr-teleop-demo.md](docs/vr-teleop-demo.md)
 
 ---
 
@@ -70,7 +73,7 @@ Full checklist and demos: [lab-workstation-quickstart.md](docs/lab-workstation-q
 | Area | Files |
 |------|--------|
 | Lab IPs, camera IDs, robot type | `droid/misc/parameters.py` |
-| NUC: optional gripper (workstation has USB) | `droid/franka/robot.py` |
+| NUC: gripper on USB, arm via Polymetis | `droid/franka/robot.py` |
 | Workstation client: no Polymetis relaunch | `droid/robot_env.py`, `droid/misc/server_interface.py` |
 | Gripper launch / COM port autodetect | `droid/franka/launch_gripper.sh` |
 | Setup & session scripts | `scripts/setup/` |
@@ -84,6 +87,7 @@ Key patches and install helpers are under `scripts/setup/`; polymetis lazy-impor
 
 | Doc | Purpose |
 |-----|---------|
+| [vr-teleop-demo.md](docs/vr-teleop-demo.md) | **Primary demo** — Quest VR arm + gripper |
 | [lab-workstation-quickstart.md](docs/lab-workstation-quickstart.md) | Main runbook for labmates |
 | [nuc-agent-instructions.md](docs/nuc-agent-instructions.md) | NUC Polymetis / zerorpc admin |
 | [openpi-policy-rollout.md](docs/openpi-policy-rollout.md) | π₀.5-DROID policy server + rollout |
@@ -97,16 +101,18 @@ OpenPI itself is **not** vendored here—clone [openpi](https://github.com/Physi
 ## Common commands
 
 ```bash
+# VR teleop — fresh start (reset + NUC stack + demo)
+conda activate robot && cd ~/Desktop/DROID
+bash scripts/demo/start_vr_teleop_demo.sh
+
+# π₀.5 policy — fresh start (reset + NUC stack + policy server + rollout)
+bash scripts/demo/start_pi05_demo.sh
+bash scripts/demo/start_pi05_demo.sh --dry-run   # inference only, no motion
+
 # Arm read-only smoke test
-conda activate robot && python scripts/demo/arm_smoke_test.py
+python scripts/demo/arm_smoke_test.py
 
-# VR teleop (arm + gripper)
-python scripts/demo/vr_teleop_demo.py
-
-# OpenPI π₀.5 rollout (after policy server is up)
-python scripts/demo/openpi_pi05_rollout.py --dry-run
-
-# Reset half-started NUC/workstation processes
+# Clean shutdown
 bash scripts/setup/openpi_session_reset.sh
 ```
 

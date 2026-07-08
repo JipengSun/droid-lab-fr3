@@ -64,7 +64,8 @@ def main():
         robot.launch_robot()
         print("launch_robot OK")
     except zerorpc.exceptions.RemoteError as err:
-        print(f"launch_robot skipped (RemoteError: gripper likely absent on NUC)")
+        print(f"launch_robot failed ({err})")
+        print("Ensure NUC has gripper server (:50052) and synced robot.py — see nuc-admin.md")
     except Exception as err:
         print(f"launch_robot skipped ({err.__class__.__name__})")
 
